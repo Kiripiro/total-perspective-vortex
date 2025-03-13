@@ -1,17 +1,27 @@
 import os
 import mne
 import numpy as np
+import matplotlib.pyplot as plt
+import time
+import joblib
+
 from mne.preprocessing import ICA
 from mne.decoding import CSP
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import GroupShuffleSplit, GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score
 
 # --- Fonction d'extraction des epochs ---
-def extract_epochs(raw, event_id, tmin, tmax, picks=None):
+def extract_epochs(raw, event_id, tmin, tmax, picks='eeg'):
+    """
+    Extrait les epochs en utilisant le canal de stimulation 'STI014'
+    ou, en cas d'absence, à partir des annotations.
+    Utilise par défaut uniquement les canaux EEG.
+    """
     try:
         events = mne.find_events(raw, stim_channel='STI014', verbose=False)
     except Exception:
@@ -44,15 +54,22 @@ print(f"Nombre de fichiers EDF trouvés : {len(edf_files)}")
 # --- Initialisation des listes pour accumuler les données extraites ---
 features_all = []
 labels_all = []
+groups_all = []  # Pour stocker l'ID du sujet pour chaque epoch
 
 # Paramètres communs
-event_id = {'T1': 1, 'T2': 2}   # À adapter selon vos annotations
-tmin, tmax = 0, 2               # Fenêtre d'extraction des epochs (en secondes)
-freq_bands = [(4, 8), (8, 12), (12, 16), (16, 20), (20, 24)]  # Bandes de fréquences pour FBCSP
+event_id = {'T1': 1, 'T2': 2}   # On exclut T0 (baseline)
+tmin, tmax = 0, 2               # Fenêtre d'extraction (à ajuster si besoin)
+# On peut aussi ajouter des bandes supplémentaires si nécessaire (ici jusqu'à 40Hz)
+freq_bands = [(4, 8), (8, 12), (12, 16), (16, 20), (20, 24), (24, 30), (30, 40)]  
+n_csp = 8  # Nombre de composantes CSP par bande
 
-# --- Parcours de tous les fichiers EDF ---
+# --- Extraction des features sur l'ensemble des fichiers ---
 for file in edf_files:
     print("Traitement de :", file)
+    # Extraction de l'ID du sujet à partir du chemin : 
+    # Par exemple, pour "/.../S076/S076R02.edf", on récupère "S076"
+    subject_id = os.path.basename(os.path.dirname(file))
+    
     try:
         raw = mne.io.read_raw_edf(file, preload=True, verbose=False)
     except Exception as e:
@@ -64,7 +81,8 @@ for file in edf_files:
     
     # Application de l'ICA pour éliminer les artefacts
     try:
-        ica = ICA(n_components=20, random_state=97, max_iter=1000, fit_params={'tol': 0.0001}, verbose=False)
+        ica = ICA(n_components=20, random_state=97, max_iter=1000,
+                  fit_params={'tol': 0.0001}, verbose=False)
         ica.fit(raw)
         raw_clean = raw.copy()
         ica.apply(raw_clean)
@@ -72,31 +90,32 @@ for file in edf_files:
         print(f"Erreur lors de l'ICA pour {file} : {e}")
         continue
 
-    # Extraction des epochs avec la fonction fournie
+    # Extraction des epochs (uniquement canaux EEG)
     try:
-        epochs = extract_epochs(raw_clean, event_id, tmin, tmax)
-        # Vérifier que les epochs contiennent au moins l'un des événements de tâche (T1 ou T2)
+        epochs = extract_epochs(raw_clean, event_id, tmin, tmax, picks='eeg')
         unique_events = np.unique(epochs.events[:, -1])
         if not any(evt in unique_events for evt in event_id.values()):
             print(f"Fichier {file} semble être un run baseline (uniquement {unique_events}). On le saute.")
             continue
+        print(f"Distribution des classes pour {file}: {np.unique(epochs.events[:, -1], return_counts=True)}")
     except Exception as e:
         print(f"Erreur lors de l'extraction des epochs pour {file} : {e}")
         continue
 
-
-    # Récupération des labels depuis la dernière colonne des événements
+    # Récupération des labels
     labels = epochs.events[:, -1]
     
-    # Extraction des caractéristiques via FBCSP pour chaque bande de fréquences
+    # Pour chaque epoch, assigner l'ID du sujet (même valeur pour toutes les epochs du fichier)
+    n_epochs = len(labels)
+    groups_all.append(np.full(n_epochs, subject_id))
+    
+    # Extraction des caractéristiques via FBCSP pour chaque bande
     features_list = []
     for band in freq_bands:
         try:
-            # Filtrage pour la bande spécifique
             epochs_band = epochs.copy().filter(band[0], band[1], fir_design='firwin', verbose=False)
-            # Mise en place du CSP : extraction de 4 composantes par bande
-            csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
-            X_band = epochs_band.get_data()  # Dimensions : (n_epochs, n_channels, n_times)
+            csp = CSP(n_components=n_csp, reg=None, log=True, norm_trace=False)
+            X_band = epochs_band.get_data()  # (n_epochs, n_channels, n_times)
             csp.fit(X_band, labels)
             X_features = csp.transform(X_band)
             features_list.append(X_features)
@@ -108,29 +127,37 @@ for file in edf_files:
         print(f"Aucune caractéristique extraite pour {file}")
         continue
 
-    # Concaténation des caractéristiques extraites de toutes les bandes
     X_file = np.concatenate(features_list, axis=1)
     features_all.append(X_file)
     labels_all.append(labels)
 
-# Vérifier que des données ont été extraites
 if not features_all:
     raise ValueError("Aucune donnée n'a pu être extraite des fichiers.")
 
-# Création du jeu de données global
+# Création du dataset global
 X_total = np.concatenate(features_all, axis=0)
 y_total = np.concatenate(labels_all, axis=0)
+groups_total = np.concatenate(groups_all, axis=0)
 
 print("Taille totale des données :", X_total.shape)
+print("Distribution globale des classes:", np.unique(y_total, return_counts=True))
+print("Nombre de sujets distincts :", len(np.unique(groups_total)))
 
-# --- Division du dataset : 75 % pour l'entraînement, 25 % pour le test ---
-X_train, X_test, y_train, y_test = train_test_split(
-    X_total, y_total, test_size=0.25, random_state=42, stratify=y_total
-)
+# --- Séparation Train/Test au niveau des sujets ---
+from sklearn.model_selection import GroupShuffleSplit
+gss = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=42)
+train_idx, test_idx = next(gss.split(X_total, y_total, groups_total))
+X_train, X_test = X_total[train_idx], X_total[test_idx]
+y_train, y_test = y_total[train_idx], y_total[test_idx]
+groups_train, groups_test = groups_total[train_idx], groups_total[test_idx]
+
+print("Nombre de sujets dans l'entraînement :", len(np.unique(groups_train)))
+print("Nombre de sujets dans le test :", len(np.unique(groups_test)))
 
 # --- Grid Search pour optimiser et comparer plusieurs classificateurs ---
 pipeline = Pipeline([
-    ('clf', SVC())  # Placeholder, remplacé par grid search
+    ('scaler', StandardScaler()),
+    ('clf', SVC())
 ])
 
 param_grid = [
@@ -146,7 +173,6 @@ param_grid = [
     },
     {
         'clf': [LinearDiscriminantAnalysis()]
-        # LDA a peu d'hyperparamètres à optimiser
     }
 ]
 
@@ -156,7 +182,10 @@ grid.fit(X_train, y_train)
 print("Meilleurs paramètres trouvés :", grid.best_params_)
 print("Score de validation croisée optimal :", grid.best_score_)
 
-# Évaluation finale sur le jeu de test
 best_model = grid.best_estimator_
 test_score = best_model.score(X_test, y_test)
 print("Précision sur le jeu de test :", test_score)
+
+# --- Sauvegarde du modèle entraîné ---
+joblib.dump(best_model, f"model_eeg_{test_score:.4f}.pkl")
+print("Modèle sauvegardé sous 'model_eeg_*.pkl'.")
