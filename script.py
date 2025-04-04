@@ -1,191 +1,181 @@
 import os
 import mne
 import numpy as np
+import subprocess
 import matplotlib.pyplot as plt
-import time
-import joblib
-
-from mne.preprocessing import ICA
+import seaborn as sns
+from mne.time_frequency import psd_array_multitaper
 from mne.decoding import CSP
-from sklearn.model_selection import GroupShuffleSplit, GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
-# --- Fonction d'extraction des epochs ---
-def extract_epochs(raw, event_id, tmin, tmax, picks='eeg'):
-    """
-    Extrait les epochs en utilisant le canal de stimulation 'STI014'
-    ou, en cas d'absence, à partir des annotations.
-    Utilise par défaut uniquement les canaux EEG.
-    """
+# ----------------------------- Utilitaires -----------------------------
+
+def clean_channel_name(ch_name):
+    return ch_name.replace('.', '').upper()
+
+def sync_files_from_s3(destination):
+    s3_command = (
+        f"aws s3 sync --no-sign-request "
+        f"s3://physionet-open/eegmmidb/1.0.0/ {destination}"
+    )
+    print("Synchronisation des fichiers depuis S3...")
     try:
-        events = mne.find_events(raw, stim_channel='STI014', verbose=False)
-    except Exception:
-        print("Canal 'STI014' non trouvé. Extraction des événements à partir des annotations.")
+        subprocess.run(s3_command, shell=True, check=True)
+        print("Synchronisation réussie.")
+    except subprocess.CalledProcessError as e:
+        print(f"Erreur lors de la synchronisation : {e}")
+        exit(1)
+
+def get_all_edf_files(data_dir):
+    return [
+        os.path.join(root, file)
+        for root, _, files in os.walk(data_dir)
+        for file in files
+        if file.lower().endswith(".edf")
+    ]
+
+def filter_task_files(edf_files, runs=['R03', 'R04', 'R07', 'R08', 'R11', 'R12']):
+    return [f for f in edf_files if any(r in f for r in runs)]
+
+# -------------------------- Prétraitement EEG --------------------------
+
+def preprocess_raw(edf_path):
+    raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
+    raw.set_eeg_reference('average', projection=False)  # directement appliquée
+    raw.rename_channels({ch: clean_channel_name(ch) for ch in raw.ch_names})
+    montage = mne.channels.make_standard_montage('standard_1020')
+    raw.set_montage(montage, match_case=False)
+    raw.filter(4, 40, fir_design='firwin', verbose=False)
+    return raw
+
+def extract_valid_epochs(raw, event_id, tmin=-0.5, tmax=4):
+    try:
         events, annot_event_id = mne.events_from_annotations(raw)
-        event_id = {k: v for k, v in annot_event_id.items() if k in event_id}
-        if not event_id:
-            raise ValueError("Aucun événement correspondant à event_id trouvé dans les annotations.")
-    epochs = mne.Epochs(raw, events, event_id=event_id, tmin=tmin, tmax=tmax,
-                        picks=picks, preload=True, baseline=None, verbose=False)
-    return epochs
-
-# --- Parcours des fichiers EDF dans le dataset ---
-data_dir = os.path.expanduser("~/sgoinfre/eegmmidb")
-if not os.path.exists(data_dir):
-    raise ValueError(f"Le répertoire {data_dir} n'existe pas.")
-
-edf_files = []
-for root, dirs, files in os.walk(data_dir):
-    for file in files:
-        if file.lower().endswith('.edf'):
-            full_path = os.path.join(root, file)
-            if os.path.exists(full_path):
-                edf_files.append(full_path)
-            else:
-                print(f"Le fichier {full_path} n'existe pas.")
-
-print(f"Nombre de fichiers EDF trouvés : {len(edf_files)}")
-
-# --- Initialisation des listes pour accumuler les données extraites ---
-features_all = []
-labels_all = []
-groups_all = []  # Pour stocker l'ID du sujet pour chaque epoch
-
-# Paramètres communs
-event_id = {'T1': 1, 'T2': 2}   # On exclut T0 (baseline)
-tmin, tmax = 0, 2               # Fenêtre d'extraction (à ajuster si besoin)
-# On peut aussi ajouter des bandes supplémentaires si nécessaire (ici jusqu'à 40Hz)
-freq_bands = [(4, 8), (8, 12), (12, 16), (16, 20), (20, 24), (24, 30), (30, 40)]  
-n_csp = 8  # Nombre de composantes CSP par bande
-
-# --- Extraction des features sur l'ensemble des fichiers ---
-for file in edf_files:
-    print("Traitement de :", file)
-    # Extraction de l'ID du sujet à partir du chemin : 
-    # Par exemple, pour "/.../S076/S076R02.edf", on récupère "S076"
-    subject_id = os.path.basename(os.path.dirname(file))
-    
-    try:
-        raw = mne.io.read_raw_edf(file, preload=True, verbose=False)
+        valid_event_id = {k: v for k, v in event_id.items() if k in annot_event_id}
+        if not valid_event_id:
+            print("Aucune annotation trouvée.")
+            return None
+        epochs = mne.Epochs(raw, events, event_id=valid_event_id, tmin=tmin, tmax=tmax,
+                            picks='eeg', preload=True, baseline=None, verbose=False)
+        return epochs
     except Exception as e:
-        print(f"Erreur lors de la lecture de {file} : {e}")
-        continue
-    
-    # Filtrage entre 1 et 40 Hz
-    raw.filter(1, 40, fir_design='firwin', verbose=False)
-    
-    # Application de l'ICA pour éliminer les artefacts
-    try:
-        ica = ICA(n_components=20, random_state=97, max_iter=1000,
-                  fit_params={'tol': 0.0001}, verbose=False)
-        ica.fit(raw)
-        raw_clean = raw.copy()
-        ica.apply(raw_clean)
-    except Exception as e:
-        print(f"Erreur lors de l'ICA pour {file} : {e}")
-        continue
+        print(f"Erreur extraction epochs : {e}")
+        return None
 
-    # Extraction des epochs (uniquement canaux EEG)
+# --------------------------- Visualisation -----------------------------
+
+def save_psd_visualizations(psds, freqs, labels, raw, output_dir, filename_prefix=""):
+    os.makedirs(output_dir, exist_ok=True)
+
+    # PSD C3 vs C4
     try:
-        epochs = extract_epochs(raw_clean, event_id, tmin, tmax, picks='eeg')
-        unique_events = np.unique(epochs.events[:, -1])
-        if not any(evt in unique_events for evt in event_id.values()):
-            print(f"Fichier {file} semble être un run baseline (uniquement {unique_events}). On le saute.")
+        c3_idx = raw.ch_names.index("C3")
+        c4_idx = raw.ch_names.index("C4")
+        plt.figure(figsize=(8, 4))
+        for label_id in np.unique(labels):
+            psd_c3 = psds[labels == label_id, c3_idx, :].mean(axis=0)
+            psd_c4 = psds[labels == label_id, c4_idx, :].mean(axis=0)
+            plt.plot(freqs, psd_c3, label=f"T{label_id} - C3", linestyle='--')
+            plt.plot(freqs, psd_c4, label=f"T{label_id} - C4", linestyle='-')
+        plt.title("PSD - C3 vs C4")
+        plt.xlabel("Fréquence (Hz)")
+        plt.ylabel("Puissance (uV²/Hz)")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"{filename_prefix}PSD_C3_vs_C4.png"))
+        plt.close()
+    except ValueError:
+        print("Canaux C3 ou C4 non trouvés.")
+
+    # Heatmaps par classe
+    for label_id in np.unique(labels):
+        psd_class = psds[labels == label_id].mean(axis=0)
+        plt.figure(figsize=(10, 6))
+        sns.heatmap(psd_class, xticklabels=10, yticklabels=raw.ch_names, cmap="viridis")
+        plt.title(f"Heatmap PSD - Classe T{label_id}")
+        plt.xlabel("Fréquences (Hz)")
+        plt.ylabel("Canaux EEG")
+        xtick_freqs = freqs[::10].astype(int)
+        plt.xticks(ticks=np.arange(0, len(freqs), 10), labels=xtick_freqs, rotation=45)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"{filename_prefix}heatmap_T{label_id}.png"))
+        plt.close()
+
+# ----------------------------- Main Script -----------------------------
+
+def main():
+    data_dir = os.path.expanduser("~/sgoinfre/eegmmidb")
+    os.makedirs(data_dir, exist_ok=True)
+
+    edf_files = get_all_edf_files(data_dir)
+
+    if not edf_files:
+        sync_files_from_s3(data_dir)
+        edf_files = get_all_edf_files(data_dir)
+
+    print(f"Nombre total de fichiers EDF : {len(edf_files)}")
+
+    edf_files_tasks = filter_task_files(edf_files)
+    print(f"Nombre de fichiers pour les tâches motrices : {len(edf_files_tasks)}")
+
+    X_all = []
+    y_all = []
+
+    event_id_input = {'T0': 1, 'T1': 2, 'T2': 3}  # T1 = main gauche, T2 = main droite
+
+    for edf_file in edf_files_tasks:
+        print(f"Traitement : {edf_file}")
+        raw = preprocess_raw(edf_file)
+        epochs = extract_valid_epochs(raw, event_id_input)
+
+        if epochs is None:
             continue
-        print(f"Distribution des classes pour {file}: {np.unique(epochs.events[:, -1], return_counts=True)}")
-    except Exception as e:
-        print(f"Erreur lors de l'extraction des epochs pour {file} : {e}")
-        continue
 
-    # Récupération des labels
-    labels = epochs.events[:, -1]
-    
-    # Pour chaque epoch, assigner l'ID du sujet (même valeur pour toutes les epochs du fichier)
-    n_epochs = len(labels)
-    groups_all.append(np.full(n_epochs, subject_id))
-    
-    # Extraction des caractéristiques via FBCSP pour chaque bande
-    features_list = []
-    for band in freq_bands:
-        try:
-            epochs_band = epochs.copy().filter(band[0], band[1], fir_design='firwin', verbose=False)
-            csp = CSP(n_components=n_csp, reg=None, log=True, norm_trace=False)
-            X_band = epochs_band.get_data()  # (n_epochs, n_channels, n_times)
-            csp.fit(X_band, labels)
-            X_features = csp.transform(X_band)
-            features_list.append(X_features)
-        except Exception as e:
-            print(f"Erreur avec CSP pour {file} et la bande {band} : {e}")
-            continue
-    
-    if not features_list:
-        print(f"Aucune caractéristique extraite pour {file}")
-        continue
+        # Ne garder que les essais T1 et T2 (main gauche et droite)
+        epochs = epochs.copy().filter(None, None)  # Juste pour forcer la copie complète
+        events = epochs.events[:, 2]
+        mask = np.isin(events, [2, 3])
+        epochs = epochs[mask]
+        labels = events[mask]
+        labels_bin = (labels == 3).astype(int)  # 0 = gauche (T1), 1 = droite (T2)
 
-    X_file = np.concatenate(features_list, axis=1)
-    features_all.append(X_file)
-    labels_all.append(labels)
+        # Sauvegarde des visualisations PSD classiques
+        psds, freqs = psd_array_multitaper(epochs.get_data(), sfreq=epochs.info['sfreq'], fmin=4, fmax=40)
+        subject_id = os.path.basename(edf_file).split('.')[0]
+        output_dir = os.path.join("outputs", "psd_plots", subject_id)
+        save_psd_visualizations(psds, freqs, labels, raw, output_dir, filename_prefix=subject_id + "_")
 
-if not features_all:
-    raise ValueError("Aucune donnée n'a pu être extraite des fichiers.")
+        X_all.append(epochs.get_data())  # (n_epochs, n_channels, n_times)
+        y_all.append(labels_bin)
 
-# Création du dataset global
-X_total = np.concatenate(features_all, axis=0)
-y_total = np.concatenate(labels_all, axis=0)
-groups_total = np.concatenate(groups_all, axis=0)
+    # Fusion des fichiers
+    X = np.concatenate(X_all, axis=0)
+    y = np.concatenate(y_all, axis=0)
+    print(f"Forme finale X : {X.shape}, y : {y.shape}")
 
-print("Taille totale des données :", X_total.shape)
-print("Distribution globale des classes:", np.unique(y_total, return_counts=True))
-print("Nombre de sujets distincts :", len(np.unique(groups_total)))
+    # Split train/test
+    X_train, X_test, y_train, y_test = train_test_split(X, y, stratify=y, test_size=0.2, random_state=42)
 
-# --- Séparation Train/Test au niveau des sujets ---
-from sklearn.model_selection import GroupShuffleSplit
-gss = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=42)
-train_idx, test_idx = next(gss.split(X_total, y_total, groups_total))
-X_train, X_test = X_total[train_idx], X_total[test_idx]
-y_train, y_test = y_total[train_idx], y_total[test_idx]
-groups_train, groups_test = groups_total[train_idx], groups_total[test_idx]
+    # Pipeline CSP + SVM
+    csp = CSP(n_components=4, reg=None, log=True, norm_trace=False)
+    clf = SVC(kernel='linear', C=1)
 
-print("Nombre de sujets dans l'entraînement :", len(np.unique(groups_train)))
-print("Nombre de sujets dans le test :", len(np.unique(groups_test)))
+    pipe = Pipeline([
+        ('CSP', csp),
+        ('SVM', clf)
+    ])
 
-# --- Grid Search pour optimiser et comparer plusieurs classificateurs ---
-pipeline = Pipeline([
-    ('scaler', StandardScaler()),
-    ('clf', SVC())
-])
+    # Entraînement et test
+    pipe.fit(X_train, y_train)
+    accuracy = pipe.score(X_test, y_test)
+    print(f"✅ Précision CSP + SVM (main gauche vs droite) : {accuracy:.4f}")
 
-param_grid = [
-    {
-        'clf': [SVC()],
-        'clf__kernel': ['linear', 'rbf'],
-        'clf__C': [0.1, 1, 10]
-    },
-    {
-        'clf': [RandomForestClassifier(random_state=42)],
-        'clf__n_estimators': [50, 100, 200],
-        'clf__max_depth': [None, 10, 20]
-    },
-    {
-        'clf': [LinearDiscriminantAnalysis()]
-    }
-]
+    # Visualisation des patterns CSP
+    print("Affichage des patterns spatiaux CSP...")
+    csp.plot_patterns(epochs.info, ch_type='eeg', units='Patterns (a.u.)', size=1.5)
 
-grid = GridSearchCV(pipeline, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
-grid.fit(X_train, y_train)
-
-print("Meilleurs paramètres trouvés :", grid.best_params_)
-print("Score de validation croisée optimal :", grid.best_score_)
-
-best_model = grid.best_estimator_
-test_score = best_model.score(X_test, y_test)
-print("Précision sur le jeu de test :", test_score)
-
-# --- Sauvegarde du modèle entraîné ---
-joblib.dump(best_model, f"model_eeg_{test_score:.4f}.pkl")
-print("Modèle sauvegardé sous 'model_eeg_*.pkl'.")
+if __name__ == "__main__":
+    main()
