@@ -68,7 +68,6 @@ python mybci.py [subject] [run] [mode] [options]
 
 ```
 config.py                      # BCIConfig + ExperimentConfig
-classifier.py                  # Backward-compatible shim importing BCIClassifier from pipeline
 mybci.py                       # CLI / application wiring
 pipeline/
 	bci_classifier.py            # BCIClassifier (pipeline construction / grid search)
