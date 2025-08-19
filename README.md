@@ -14,7 +14,7 @@ Expected path pattern: `data/Sxxx/SxxxRyy.edf` (example: `data/S001/S001R03.edf`
 python -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
-pip install -e .
+pip install -r requirements.txt
 ```
 
 Create a `.env` file at the root of the project and copy:
