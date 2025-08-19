@@ -1,4 +1,10 @@
 /data
-*.sh
-/venv
-/outputs
+**/__pycache__
+**/*.pyc
+.vscode/
+settings.json
+logs/
+figures/
+.env
+models/
+venv/
