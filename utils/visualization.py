@@ -4,6 +4,9 @@ from typing import Optional, Dict, Any, Sequence
 
 import numpy as np
 
+from utils.matplotlib_config import configure_matplotlib_backend
+configure_matplotlib_backend()
+
 try:
     import matplotlib.pyplot as plt
 except Exception:
@@ -215,26 +218,23 @@ class EEGVisualizer:
             artifacts['figures'].append(raw_browser)
         else:
             fig_raw = self._make_stacked_figure(raw, 'Raw EEG (all channels)')
-            p_raw = out_dir / '00_raw_all.png'
-            fig_raw.savefig(p_raw, dpi=120)
-            artifacts['raw_all'] = str(p_raw)
             artifacts['figures'].append(fig_raw)
+            p_raw = out_dir / '00_raw_all.png'
+            artifacts['raw_all'] = str(p_raw)
         raw_filt_all = self._bandpass(raw)
         if viewer == 'mne':
             filt_browser = raw_filt_all.plot(block=False, title=f'Filtered {self.config.fmin}-{self.config.fmax} Hz (all)')
             artifacts['figures'].append(filt_browser)
         else:
             fig_filt = self._make_stacked_figure(raw_filt_all, f'Filtered {self.config.fmin}-{self.config.fmax} Hz (all)')
-            p_filt = out_dir / '02_filtered_all.png'
-            fig_filt.savefig(p_filt, dpi=120)
-            artifacts['filtered_all'] = str(p_filt)
             artifacts['figures'].append(fig_filt)
+            p_filt = out_dir / '02_filtered_all.png'
+            artifacts['filtered_all'] = str(p_filt)
         raw_filt_sel = self._select_channels(raw_filt_all)
         fig_sel = self._make_stacked_figure(raw_filt_sel, 'Filtered (selected)')
-        p_sel = out_dir / '04_filtered_selected.png'
-        fig_sel.savefig(p_sel, dpi=120)
-        artifacts['filtered_selected'] = str(p_sel)
         artifacts['figures'].append(fig_sel)
+        p_sel = out_dir / '04_filtered_selected.png'
+        artifacts['filtered_selected'] = str(p_sel)
         data_sel = raw_filt_sel.get_data()
         sfreq = raw_filt_sel.info['sfreq']
         freqs_sel, pxx_sel = welch(data_sel, fs=sfreq, nperseg=min(512, data_sel.shape[1]))
@@ -247,29 +247,26 @@ class EEGVisualizer:
         ax_sel_psd.set_ylabel('PSD')
         ax_sel_psd.legend(fontsize='x-small')
         fig_sel_psd.tight_layout()
-        p_psd = out_dir / '05_filtered_selected_psd.png'
-        fig_sel_psd.savefig(p_psd, dpi=120)
-        artifacts['filtered_selected_psd'] = str(p_psd)
         artifacts['figures'].append(fig_sel_psd)
+        p_psd = out_dir / '05_filtered_selected_psd.png'
+        artifacts['filtered_selected_psd'] = str(p_psd)
         mask_sel = (freqs_sel >= self.config.fmin) & (freqs_sel <= self.config.fmax)
         band_power = pxx_sel[:, mask_sel].mean(axis=1)
         fig_bp, ax_bp = plt_local.subplots(figsize=(6, 3))
         ax_bp.bar(raw_filt_sel.ch_names, band_power)
         ax_bp.set_title(f'Mean {self.config.fmin}-{self.config.fmax} Hz Power (selected)')
         fig_bp.tight_layout()
-        p_bp = out_dir / '06_band_power.png'
-        fig_bp.savefig(p_bp, dpi=120)
-        artifacts['band_power_plot'] = str(p_bp)
         artifacts['figures'].append(fig_bp)
+        p_bp = out_dir / '06_band_power.png'
+        artifacts['band_power_plot'] = str(p_bp)
         if len(raw_filt_sel.ch_names) >= 3:
             fig_topo, ax_topo = plt_local.subplots(figsize=(4, 4))
             mne.viz.plot_topomap(band_power, raw_filt_sel.info, axes=ax_topo, show=False)
             ax_topo.set_title('Band Power Topomap')
             fig_topo.tight_layout()
-            p_topo = out_dir / '07_topomap.png'
-            fig_topo.savefig(p_topo, dpi=120)
-            artifacts['topomap'] = str(p_topo)
             artifacts['figures'].append(fig_topo)
+            p_topo = out_dir / '07_topomap.png'
+            artifacts['topomap'] = str(p_topo)
         artifacts['band_power_values'] = {ch: float(v) for ch, v in zip(raw_filt_sel.ch_names, band_power)}
         artifacts['freqs_sample'] = freqs_sel[:10].tolist()
         return artifacts
