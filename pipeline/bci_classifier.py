@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Tuple, Optional, Any, Dict
 
 import numpy as np
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
+from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -29,11 +29,12 @@ class BCIClassifier:
             steps.append(('scaler', StandardScaler()))
         if self.config.use_feature_selection:
             steps.append(('select', SelectPercentile(mutual_info_classif, percentile=100)))
-        lda = LDA(
-            solver='lsqr' if self.config.lda_shrinkage else 'svd',
-            shrinkage='auto' if self.config.lda_shrinkage else None,
+        clf = LogisticRegression(
+            random_state=self.config.random_state,
+            max_iter=1000,
+            C=0.01
         )
-        steps.append(('clf', lda))
+        steps.append(('clf', clf))
         return Pipeline(steps)
 
     def hyperparameter_search(
@@ -44,9 +45,13 @@ class BCIClassifier:
         extra_params: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Pipeline, float]:
         pipe = self._build_pipeline()
-        params: Dict[str, Any] = {'fbcsp__n_csp': [2, 3, 4]}
+        params: Dict[str, Any] = {'fbcsp__n_csp': [2, 3]}
         if self.config.use_feature_selection:
             params['select__percentile'] = list(self.config.feature_selection_percentiles)
+        
+        if hasattr(pipe.named_steps.get('clf'), 'C'):
+            params['clf__C'] = [0.001, 0.01, 0.1, 1.0]
+        
         if extra_params:
             params.update(extra_params)
         gs = GridSearchCV(

@@ -1,30 +1,26 @@
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 
 @dataclass(frozen=True)
 class BCIConfig:
-    """Configuration for BCI motor imagery classification.
-
-    NOTE: Some fields appear twice previously due to a merge oversight; duplicates removed.
-    """
+    """Configuration for BCI motor imagery classification."""
 
     fmin: float = 8.0
     fmax: float = 32.0
-    tmin: float = 0.7
-    tmax: float = 3.9
-    eeg_channels: List[str] = None
+    tmin: float = 0.5
+    tmax: float = 2.0
+    eeg_channels: Optional[List[str]] = None
     sfreq: float = 160.0
 
     n_csp: int = 3
     use_scaler: bool = True
     use_feature_selection: bool = True
-    feature_selection_percentiles: Tuple[int, ...] = (70, 85, 100)
-    lda_shrinkage: bool = True
+    feature_selection_percentiles: Tuple[int, ...] = (10, 25, 50)
 
     cv_folds: int = 5
-    inner_repeats: int = 3
-    test_size: float = 0.2
+    inner_repeats: int = 5
+    test_size: float = 0.3
     random_state: int = 42
 
     save_min_test_acc: float = 0.0
@@ -41,7 +37,7 @@ class BCIConfig:
 class ExperimentConfig:
     """Configuration for experiments."""
     
-    runs: Dict[int, List[int]] = None
+    runs: Optional[Dict[int, List[int]]] = None
     
     def __post_init__(self):
         if self.runs is None:

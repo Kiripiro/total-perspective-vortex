@@ -1,130 +1,164 @@
 # Total Perspective Vortex
 
-Motor imagery (left vs right hand) classification on the PhysioNet EEG Motor Movement/Imagery dataset. Core pipeline: Filter Bank CSP → (optional scaling + feature selection) → Shrinkage LDA. Includes visualization, per‑run prediction simulation, and multi‑subject evaluation.
+Motor imagery (left vs right hand) classification on the PhysioNet EEG Motor Movement/Imagery dataset. Core pipeline: Filter Bank CSP → (optional scaling + feature selection) → Logistic Regression. Includes visualization, per‑run prediction “replay”, and multi‑subject evaluation.
 
-## 1. Dataset
+## 1) Dataset
 
-Public source: physionet-open/eegmmidb (EDF files).  
-On first run, if `data/` is empty, files are auto‑synced (public S3, `--no-sign-request`).  
-Expected path pattern: `data/Sxxx/SxxxRyy.edf` (example: `data/S001/S001R03.edf`).
+Public source: physionet-open/eegmmidb (EDF files).
 
-## 2. Installation
+- First run: if `data/` (or path in `.env`) is empty, files are auto‑synced (public S3).
+- Path pattern: `data/Sxxx/SxxxRyy.edf` (e.g. `data/S001/S001R03.edf`).
 
-```bash
-python -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-Create a `.env` file at the root of the project and copy:
+Optional `.env` at project root:
 
 ```
 DATA_DIR=./data
 ```
 
-Change `DATA_DIR` to point elsewhere if you store EDF files outside `./data`.
-
-## 3. Quick Start
+## 2) Installation
 
 ```bash
-# Visualize a run (MNE browser)
-python mybci.py 1 3 visualize
-
-# Interactive lightweight (stacked matplotlib instead of MNE browser)
-python mybci.py 1 3 visualize --interactive --viewer stacked
-
-# Interactive using MNE (heavy)
-python mybci.py 1 3 visualize --interactive --viewer mne
-
-# Train (baseline CV + repeated inner CV grid + stratified holdout test)
-python mybci.py 1 3 train
-
-# Predict (per‑epoch CV streaming simulation using fold‑held models)
-python mybci.py 1 3 predict
-
-# Predict but force CV simulation even if a saved model exists
-python mybci.py 1 3 predict --force_cv
-
-# Evaluate all subjects (parallel)
-python mybci.py --max_workers 4
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-General form:
+## 3) CLI Usage
 
-```
+```bash
 python mybci.py [subject] [run] [mode] [options]
 # If subject/run omitted -> evaluate all (multi‑experiment)
 ```
 
-## 4. Modes
+Quick examples:
 
-- train: Baseline K-fold CV report, then stratified holdout split (test fraction configurable). Inner `RepeatedStratifiedKFold` grid search over CSP components (+ optional feature selection percentiles). Logs to `logs/train.log`.
-- predict: Builds one model per outer fold and simulates streaming by predicting epochs sequentially, logs to `logs/predict.log`.
-- visualize: Generates raw / filtered / PSD / band power / topomap figures. Optional interactive viewers (`mne` or lightweight stacked) with `--interactive`.
-- evaluate-all (omit subject/run): Groups predefined runs per experiment (`ExperimentConfig.runs`) and runs them in parallel.
+```bash
+# Visualize a run
+python mybci.py 1 3 visualize
 
-## 5. Layout
+# Interactive viewers
+python mybci.py 1 3 visualize --interactive --viewer mne
+python mybci.py 1 3 visualize --interactive --viewer stacked
+
+# Train
+python mybci.py 1 3 train
+
+# Predict (including replay)
+python mybci.py 1 3 predict
+
+# Predict but force CV replay if no saved model
+python mybci.py 1 3 predict --force_cv
+
+# Evaluate all subjects (parallel) - if no workers are defined, it uses the maximum available on your machine
+python mybci.py --max_workers 4
+```
+
+Arguments:
+
+- `mode`: `train | predict | visualize`
+- `--max_workers`: for evaluate‑all (when no subject/run)
+- `--show`: open generated figures (non‑interactive)
+- `--interactive`: display interactive figures
+- `--viewer`: `mne | stacked` (default: `mne`)
+- `--force_cv`: in predict mode, perform CV‑based replay when no persisted model
+
+## 4) Modes
+
+- train: Baseline K‑fold CV, then stratified holdout test. Inner `RepeatedStratifiedKFold` grid over CSP components (+ optional feature selection). Logs to `logs/train.log`.
+- predict: “Replay” style sequential prediction per epoch using a saved model. If no model and `--force_cv`, builds fold‑held models (out‑of‑fold) and replays per epoch. Logs to `logs/predict.log`.
+- visualize: Generates raw/filtered/PSD/band‑power/topomap figures; optional interactive viewers.
+- evaluate‑all (omit subject/run): Runs predefined experiments across subjects in parallel; logs to `logs/evaluate.log`.
+
+Predict output format (logger):
+
+```
+epoch nb: [prediction] [truth] equal?
+epoch 00: [1] [2] False
+...
+Accuracy: 0.6818
+```
+
+## 5) Project Layout
 
 ```
 config.py                      # BCIConfig + ExperimentConfig
 mybci.py                       # CLI / application wiring
 pipeline/
 	bci_classifier.py            # BCIClassifier (pipeline construction / grid search)
-	__init__.py                  # exports BCIClassifier
 features/
-	__init__.py                  # exports FilterBankCSP
 	filter_bank_csp.py           # Filter bank + CSP feature extractor
-	custom_csp.py                # CSP implementation low-level
-modes/                         # Mode classes (train / predict / visualize / evaluate_all)
-	__init__.py
-	base.py
-	train.py
-	predict.py
-	visualize.py
-	evaluate_all.py
-utils/                         # Services & helpers
-	__init__.py                  # exports stratified_holdout
+	custom_csp.py                # CSP implementation (from scratch)
+modes/
+	base.py, train.py, predict.py, visualize.py, evaluate_all.py
+utils/
 	data_loader.py               # EDF loading + epoch extraction
-	visualization.py             # Figure generation service
-	logger.py                    # Async color + file logger + progress logger
-	split.py                     # stratified_holdout helper
-	sync_data.py                 # S3 sync
-	system_info.py               # CPU / optimal workers detection
-	model.py                     # ModelRepository (persistence)
-logs/                          # (generated)
-figures/                       # (generated)
-models/                        # Persisted trained models + metadata
-data/                          # EEG dataset (synced if absent)
+	visualization.py, logger.py, split.py, sync_data.py, system_info.py, model.py
+logs/, figures/, models/       # generated outputs
 ```
 
-## 6. Configuration (BCIConfig)
+## 6) Configuration (config.py)
 
-Key fields (see `config.py`) with defaults:
+BCIConfig defaults:
 
-- fmin / fmax (float): global band-pass for preprocessing & band power plots. Default 8.0 / 32.0 Hz.
-- tmin / tmax (float): epoch time window relative to event onset. Default 0.7 / 3.9 s.
-- eeg_channels (list[str]): channels selected after filtering. Default ["C3", "C4", "Cz"].
-- sfreq (float): expected sampling frequency (epochs must match). Default 160.0 Hz.
-- n_csp (int): CSP components per sub‑band (grid explores nearby values). Default 3.
-- use_scaler (bool): add StandardScaler. Default True.
-- use_feature_selection (bool): enable mutual information percentile selector. Default True.
-- feature_selection_percentiles (tuple[int]): percentiles tried in grid. Default (70, 85, 100).
-- lda_shrinkage (bool): use shrinkage LDA (solver=lsqr, shrinkage=auto). Default True.
-- cv_folds (int): K folds used for baseline CV and as base folds in inner repeated CV. Default 5.
-- inner_repeats (int): repeats for RepeatedStratifiedKFold in hyperparameter search. Default 3.
-- test_size (float): stratified holdout fraction for final test set. Default 0.2.
-- random_state (int): global RNG seed. Default 42.
-- save_min_test_acc (float): minimum test accuracy required to persist a model. Default 0.0.
-- force_predict_cv (bool): override to force CV simulation even if persisted model present. Default False.
-- models_dir (str): directory root for persisted models. Default "models".
-- save_models_in_evaluate_all (bool): persist per-experiment models in EvaluateAll. Default True.
+- `fmin` / `fmax`: 8.0 / 32.0 Hz (global filter for visualization/bandpower)
+- `tmin` / `tmax`: 0.5 / 2.0 s (epoch window)
+- `eeg_channels`: ["C3", "C4", "Cz"]
+- `sfreq`: 160.0
+- `n_csp`: 3
+- `use_scaler`: True
+- `use_feature_selection`: True
+- `feature_selection_percentiles`: (10, 25, 50)
+- `cv_folds`: 5
+- `inner_repeats`: 5
+- `test_size`: 0.3
+- `random_state`: 42
+- `save_min_test_acc`: 0.0
+- `force_predict_cv`: False
+- `models_dir`: "models"
+- `save_models_in_evaluate_all`: True
 
-Adjust values by editing `config.py` or instantiating a custom `BCIConfig`. Experiments (grouped runs) defined in `ExperimentConfig.runs`.
+ExperimentConfig defaults (`runs`):
 
-## 7. Visualization
+```
+0: [3, 7, 11]
+1: [4, 8, 12]
+2: [5, 9, 13]
+3: [6, 10, 14]
+4: [3, 4, 7, 8, 11, 12]
+5: [5, 6, 9, 10, 13, 14]
+```
 
-Non‑interactive output (per run):
+## 7) ML Pipeline
+
+1. Epochs from EDF (keep events 1 & 2 ⇒ labels 0/1)
+2. Filter bank (default bands: 7–11, 11–15, 15–19, 19–23, 23–27, 27–31 Hz)
+3. CSP per band (log‑variance features) + concat
+4. Optional StandardScaler
+5. Optional SelectPercentile (mutual_info_classif)
+6. LogisticRegression (default C=0.01; grid over C when tuning)
+
+Grid (hyperparameter_search):
+
+- `fbcsp__n_csp`: [2, 3]
+- `select__percentile`: values from `feature_selection_percentiles` when enabled
+- `clf__C`: [0.001, 0.01, 0.1, 1.0]
+
+## 8) Splitting & Validation
+
+- Baseline report: K‑fold CV over the run.
+- Model selection: RepeatedStratifiedKFold (repeats × folds).
+- Final: stratified holdout test (`test_size`).
+
+## 9) Predict “Replay”
+
+- If a matching saved model exists: replay per‑epoch sequentially, log line by line, then final Accuracy.
+- Else if `--force_cv`: build out‑of‑fold models with `StratifiedKFold` and replay per‑epoch.
+- A small sleep (`replay_sleep`, optional attribute) may be used to simulate delay (capped < 2s if set).
+
+## 10) Visualization Outputs
+
+Saved per run:
 
 - 00_raw_all.png
 - 01_raw_all_psd.png
@@ -135,83 +169,14 @@ Non‑interactive output (per run):
 - 06_band_power.png
 - 07_topomap.png (if ≥3 channels)
 
-Returned report dict from `EEGVisualizer.visualize_subject_run` includes file paths, band power values, sample frequencies.
+## 11) Evaluate‑All
 
-Interactive examples:
+Runs all experiments (see `ExperimentConfig.runs`) for all subjects in parallel.  
+Logs: per‑subject accuracy per experiment + experiment means; prints a final mean across experiments.
 
-```
-python mybci.py 1 3 visualize --interactive --viewer mne
-python mybci.py 1 3 visualize --interactive --viewer stacked
-```
+## 12) Model Persistence
 
-### Plot reference & usage
-
-| File                         | What it shows                                                                     | Why you look at it                                                                                                            |
-| ---------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| 00_raw_all.png               | Unfiltered stacked traces (all EEG channels)                                      | Quick data sanity: flat lines (bad channel), large drifts, muscle bursts, eye blinks before any processing.                   |
-| 01_raw_all_psd.png           | Power Spectral Density (raw)                                                      | Detect broad artefacts: strong 50/60 Hz line noise, excessive low‑freq drift, decide if band limits (fmin/fmax) are sensible. |
-| 02_filtered_all.png          | Band‑passed traces (fmin–fmax, all channels)                                      | Verify filter behaved: drifts removed, high‑freq noise attenuated, morphology preserved.                                      |
-| 03_filtered_all_psd.png      | PSD after filtering (all channels)                                                | Confirm energy concentrated inside passband and attenuation outside; inspect residual peaks (e.g. line noise).                |
-| 04_filtered_selected.png     | Filtered traces for selected channels (eeg_channels) with per‑channel std scaling | Focus on channels used for classification (e.g. C3/C4/Cz); normalized spacing makes relative modulations clearer.             |
-| 05_filtered_selected_psd.png | PSD of selected channels                                                          | Inspect mu (≈8–13 Hz) / beta (≈13–30 Hz) rhythms; look for channel‑specific peaks that may discriminate classes.              |
-| 06_band_power.png            | Mean band power per selected channel (averaged over fmin–fmax)                    | Rapid channel ranking; outliers may indicate electrode noise (too high) or poor contact (too low).                            |
-| 07_topomap.png               | Spatial topography of mean band power (selected channels mapped via montage)      | Visual lateralization / spatial distribution check; helps validate expected motor cortex focus (C3/C4).                       |
-
-Practical workflow:
-
-1. Start with 00 / 01 to assess raw quality & choose frequency band tweaks.
-2. Use 02 / 03 to confirm filtering removed unwanted components.
-3. Examine 04 / 05 for rhythm prominence & potential discriminative bands.
-4. Check 06 for quick per‑channel comparison; adjust eeg_channels if needed.
-5. Use 07 to spot spatial asymmetries consistent with motor imagery tasks.
-
-If a plot is missing:
-
-- Topomap requires ≥3 channels.
-- Any earlier failure (exception) logs a warning; re‑run with `--interactive --viewer stacked` for debugging.
-
-## 8. Logging
-
-Async logger (`logger.py`):
-
-- Console (INFO+ with colors)
-- File logs under `logs/`
-- Extra levels: SUCCESS, PROGRESS, ...
-
-For debug verbosity in custom scripts: call `setup_development_logging()`.
-
-## 9. ML Pipeline
-
-1. Load EDF → channel selection → epoch extraction (codes 1 & 2 → labels 0/1).
-2. Band-pass filter full signal to fmin–fmax (default 8–32 Hz in config) for visualization / band power.
-3. Filter bank (4‑Hz bands covering ~7–31 Hz by default: (7–11, 11–15, 15–19, 19–23, 23–27, 27–31)) → CSP per band (log-variance features) concatenated.
-4. (Optional) Standard scaling.
-5. (Optional) Mutual information percentile feature selection.
-6. Shrinkage LDA classifier.
-
-Event code mapping: EDF annotations with event codes 1 (T1) and 2 (T2) are retained and mapped to class labels 0 and 1 respectively.
-
-Filter bank details: default bands are generated via list comprehension `[(f, f+4) for f in range(7, 30, 4)]` producing 6 contiguous 4‑Hz bands (upper edge inclusive of 31 Hz).
-
-Grid search space: CSP components (`fbcsp__n_csp`) ∈ {2,3,4} + optional feature percentiles (`select__percentile`) when feature selection enabled.
-
-## 10. Splitting & Validation
-
-- Baseline: simple K‑fold CV over whole run (quick variance gauge).
-- Model selection: inner repeated stratified K‑fold (repeats × folds) for robustness.
-- Final reporting: stratified single holdout test set (never used in tuning).
-
-This keeps the test set untouched and reduces overfitting risk on tiny epoch counts.
-
-## 11. Parallel Evaluation
-
-`EvaluateAllMode` picks a worker count from system info (Apple Silicon capped). Override via `--max_workers`.
-
-## 12. Model Persistence
-
-Train mode saves the tuned pipeline (per subject + run) when `test_acc >= save_min_test_acc`.
-
-Structure:
+Saved by Train mode when `test_acc >= save_min_test_acc`.
 
 ```
 models/
@@ -220,12 +185,4 @@ models/
 		S004_run_14.meta.json
 ```
 
-Meta file fields: subject, run, inner/test accuracies, feature count, sample counts, config hash, full config, library versions, timestamp.
-
-Predict mode:
-
-- Loads a matching saved model if present and config hash matches (fast direct inference).
-- Falls back to cross‑validated streaming simulation if none is found.
-- Use `--force_cv` to bypass a saved model intentionally (e.g. benchmarking current code changes).
-
-Altering configuration (e.g. enabling feature selection) changes the hash and automatically invalidates stale models (they are skipped with a log line indicating a config mismatch).
+Meta contains: subject/run, accuracies, counts, config hash, serialized config, library versions, timestamp. Predict mode loads matching models (config hash check). Set `--force_cv` to bypass saved models for replay benchmarks.

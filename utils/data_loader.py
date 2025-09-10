@@ -26,6 +26,7 @@ class BCIDataLoader:
                    fir_design='firwin', verbose=False)
         picks = mne.pick_channels(raw.info['ch_names'], include=self.config.eeg_channels)
         raw.pick(picks)
+        raw.resample(sfreq=80, verbose=False)
         return raw
 
     def load_raw(self, filepath: str) -> mne.io.Raw:

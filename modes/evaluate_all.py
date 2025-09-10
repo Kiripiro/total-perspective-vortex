@@ -20,7 +20,7 @@ class EvaluateAllMode:
     def __init__(self, config: BCIConfig, max_workers: Optional[int] = None):
         self.config = config
         self.data_loader = BCIDataLoader(config)
-        self.runs = DEFAULT_EXPERIMENT_CONFIG.runs
+        self.runs = DEFAULT_EXPERIMENT_CONFIG.runs or {}
         sysinfo = get_system_info()
         avail = sysinfo['available_cores']
         optimal = sysinfo['optimal_workers']
@@ -43,6 +43,8 @@ class EvaluateAllMode:
         setup_file_logging(Path('logs'), 'evaluate.log')
         for msg in warn_msgs:
             self.logger.warning(msg)
+        if not self.runs:
+            self.logger.warning('No experiments configured; self.runs is empty (DEFAULT_EXPERIMENT_CONFIG.runs was None or empty)')
 
     def execute(self, dataset_dir: str) -> None:
         subjects = [d for d in Path(dataset_dir).iterdir() if d.is_dir() and d.name.startswith('S')]
@@ -93,7 +95,7 @@ class EvaluateAllMode:
         except Exception as e:
             self.logger.error(f'Parallel evaluation error: {e}')
 
-        self.logger.info('Aggregating results...')
+        self.logger.info('Aggregating results...\n')
         for eid in sorted(self.runs.keys()):
             for idx, sid in enumerate(subject_ids):
                 acc = results[eid][idx]
@@ -104,6 +106,16 @@ class EvaluateAllMode:
                 self.logger.success(f'Experiment {eid}: mean Test accuracy = {np.mean(accs):.4f}')
             else:
                 self.logger.warning(f'Experiment {eid}: no valid results')
+        
+        all_means = []
+        for eid in sorted(self.runs.keys()):
+            accs = [a for a in results[eid] if not np.isnan(a)]
+            if accs:
+                all_means.append(np.mean(accs))
+        
+        if all_means:
+            print(f"Mean accuracy of {len(all_means)} experiments: {np.mean(all_means):.4f}")
+        
         self.logger.success(f'Global mean accuracy: {np.nanmean(results):.4f}')
         time.sleep(0.2)
         self.logger.stop()

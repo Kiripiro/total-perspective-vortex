@@ -1,7 +1,7 @@
 from __future__ import annotations
 import time
 import numpy as np
-from sklearn.model_selection import KFold
+from sklearn.model_selection import StratifiedKFold
 from .base import ModeBase
 from pipeline import BCIClassifier
 from utils.model import ModelRepository
@@ -18,46 +18,53 @@ class PredictMode(ModeBase):
             if X.size == 0:
                 self.logger.warning('No data')
                 return
-            self.logger.info(f'Data: {X.shape[0]} epochs')
-
-            if not self.config.force_predict_cv:
-                repo = ModelRepository(self.config)
-                loaded = repo.load_subject_run(subject, run)
-                if loaded:
-                    pipe, meta = loaded
-                    self.logger.info('Loaded persisted model; direct batch prediction.')
-                    preds = pipe.predict(X)
-                    acc = (preds == y).mean()
-                    self.logger.success(f'Accuracy (saved model): {acc:.4f}')
-                    return
-                else:
-                    self.logger.info('No persisted model (or config mismatch). Proceeding with CV simulation.')
-
             n = len(y)
-            models = [None] * n
-            kf = KFold(n_splits=self.config.cv_folds, shuffle=True, random_state=self.config.random_state)
-            for tr, te in kf.split(X):
-                clf = BCIClassifier(self.config)
-                clf.fit(X[tr], y[tr])
-                for idx in te:
-                    models[idx] = clf
+            self.logger.info(f'Data: {n} epochs')
 
-            preds = np.empty(n, dtype=y.dtype)
-            correct = 0
-            worst_latency = 0.0
-            for idx in range(n):
-                clf = models[idx]
-                t0 = time.perf_counter()
-                pred = clf.pipeline.predict(X[idx:idx+1])[0]
-                dt = time.perf_counter() - t0
-                worst_latency = max(worst_latency, dt)
-                preds[idx] = pred
-                ok = pred == y[idx]
-                correct += int(ok)
-                self.logger.info(f'epoch {idx:02d}: [{pred}] [{y[idx]}] {ok}')
-                time.sleep(0.5)
+            replay_sleep = min(getattr(self.config, 'replay_sleep', 1.0), 1.9)
 
-            acc = correct / n
-            self.logger.success(f'Accuracy (CV-held out per epoch): {acc:.4f}')
+            repo = ModelRepository(self.config)
+            loaded = repo.load_subject_run(subject, run)
+            if loaded:
+                pipe, _ = loaded
+                self.logger.info('Loaded persisted model; replaying per-epoch predictions.')
+                self.logger.info("epoch nb: [prediction] [truth] equal?")
+                correct = 0
+                for idx in range(n):
+                    pred = pipe.predict(X[idx:idx+1])[0]
+                    ok = pred == y[idx]
+                    correct += int(ok)
+                    self.logger.info(f"epoch {idx:02d}: [{pred+1}] [{y[idx]+1}] {ok}")
+                    time.sleep(replay_sleep)
+                acc = correct / n
+                self.logger.success(f'Accuracy: {acc:.4f}')
+                return
+
+            if getattr(self.config, 'force_predict_cv', False):
+                models = {}
+                skf = StratifiedKFold(
+                    n_splits=self.config.cv_folds,
+                    shuffle=True,
+                    random_state=self.config.random_state,
+                )
+                for tr, te in skf.split(X, y):
+                    clf = BCIClassifier(self.config)
+                    clf.fit(X[tr], y[tr])
+                    for idx in te:
+                        models[idx] = clf
+
+                correct = 0
+                self.logger.info("epoch nb: [prediction] [truth] equal?")
+                for idx in range(n):
+                    pred = models[idx].pipeline.predict(X[idx:idx+1])[0]
+                    ok = pred == y[idx]
+                    correct += int(ok)
+                    self.logger.info(f"epoch {idx:02d}: [{pred+1}] [{y[idx]+1}] {ok}")
+                    time.sleep(replay_sleep)
+                acc = correct / n
+                self.logger.success(f'Accuracy: {acc:.4f}')
+                return
+
+            self.logger.error('No persisted model. Train first or set --force_cv to run CV-based replay')
         finally:
             self._finish()
